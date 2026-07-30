@@ -8,7 +8,7 @@ import difflib
 from dotenv import load_dotenv
 import google.generativeai as genai
 
-# Завантаження змінних середовища
+# Завантаження змінних середовища (для локальної роботи)
 load_dotenv()
 
 # Налаштування сторінки
@@ -17,19 +17,24 @@ st.set_page_config(page_title="WHO Data Categorization", page_icon="🌍", layou
 st.title("🌍 WHO Project: Автоматична каталогізація даних")
 st.markdown("Завантажте файл, відфільтруйте необхідні позиції та запустіть обробку. Колонка F залишається без змін.")
 
-# Перевірка наявності ключа
+# Гнучка перевірка API ключа (локально .env або хмарні Secrets)
 api_key = os.getenv("GEMINI_API_KEY")
+if not api_key:
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"]
+    except (KeyError, FileNotFoundError):
+        api_key = None
+
 if api_key:
     genai.configure(api_key=api_key)
 else:
-    st.error("API ключ не знайдено у файлі .env.")
+    st.error("API ключ не знайдено. Перевірте файл .env локально або налаштування Secrets на Streamlit Cloud.")
     st.stop()
 
 uploaded_file = st.file_uploader("Завантажте файл Book3_classified2.xlsx", type=["xlsx"])
 
 if uploaded_file is not None:
     try:
-        # Ініціалізація сесії для збереження стану таблиці
         if 'df' not in st.session_state:
             st.session_state.df = pd.read_excel(uploaded_file, sheet_name=0, header=3)
             try:
@@ -41,7 +46,6 @@ if uploaded_file is not None:
                 st.session_state.avail_cat = []
                 st.session_state.avail_subcat = []
             
-            # Додаємо тимчасову колонку для маркування
             st.session_state.df.insert(0, "🔄 Оброблено ШІ", False)
 
         df = st.session_state.df
@@ -58,7 +62,6 @@ if uploaded_file is not None:
 
         st.subheader("1. Фільтрація даних для обробки")
         
-        # Сітка фільтрів в 1 рядок (6 колонок)
         f_cols = st.columns(6)
         
         with f_cols[0]:
@@ -76,7 +79,6 @@ if uploaded_file is not None:
             default_status = ["REVIEW"] if "REVIEW" in status_options else []
             filter_status = st.multiselect("F: Статус", options=status_options, default=default_status)
 
-        # Застосування фільтрів
         mask = pd.Series(True, index=df.index)
         if search_generic:
             mask &= df[col_generic].astype(str).str.contains(search_generic, case=False, na=False)
@@ -108,7 +110,6 @@ if uploaded_file is not None:
                 
                 total_rows = len(filtered_df)
                 
-                # База знань RAG: всі рядки, що не входять у поточну відфільтровану вибірку і вже мають категорію
                 df_kb = df[~df.index.isin(filtered_df.index) & df[col_category].notna()].copy()
                 kb_names = df_kb[col_generic].dropna().astype(str).tolist()
                 
@@ -148,7 +149,6 @@ if uploaded_file is not None:
                         st.session_state.df.at[index, col_cold_chain] = result.get("cold_chain", "")
                         st.session_state.df.at[index, "🔄 Оброблено ШІ"] = True
                         
-                        # Динамічне поповнення бази знань
                         new_row = st.session_state.df.loc[[index]]
                         df_kb = pd.concat([df_kb, new_row])
                         kb_names.append(generic_name)
@@ -166,7 +166,6 @@ if uploaded_file is not None:
         st.subheader("2. Перевірка, редагування та експорт")
         st.info("Рядки, які були оброблені ШІ у поточній сесії, позначені чекбоксом '🔄 Оброблено ШІ'.")
         
-        # Налаштування випадаючих списків для редактора
         col_config = {
             col_category: st.column_config.SelectboxColumn("Category", options=avail_cat, required=True),
             col_subcategory: st.column_config.SelectboxColumn("Subcategory", options=avail_subcat, required=True),
@@ -181,11 +180,9 @@ if uploaded_file is not None:
             key="main_editor"
         )
         
-        # Синхронізація ручних змін
         if not edited_df.equals(st.session_state.df):
             st.session_state.df.update(edited_df)
             
-        # Формування файлу на експорт (видаляємо тимчасову колонку маркування)
         export_df = st.session_state.df.drop(columns=["🔄 Оброблено ШІ"])
         
         output = io.BytesIO()
