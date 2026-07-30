@@ -128,8 +128,11 @@ if uploaded_file is not None:
                     if matches:
                         context_str = "HISTORICAL RAG CONTEXT:\n"
                         for m in matches:
-                            matched_row = df_kb[df_kb[col_generic] == m].iloc[0]
-                            context_str += f"- '{m}' -> Category: '{matched_row[col_category]}', Subcat: '{matched_row[col_subcategory]}', Std Name: '{matched_row[col_standard]}'\n"
+                            # Додано конвертацію в строку (astype(str)) та перевірку на empty для уникнення помилки indexer
+                            matching_rows = df_kb[df_kb[col_generic].astype(str) == m]
+                            if not matching_rows.empty:
+                                matched_row = matching_rows.iloc[0]
+                                context_str += f"- '{m}' -> Category: '{matched_row[col_category]}', Subcat: '{matched_row[col_subcategory]}', Std Name: '{matched_row[col_standard]}'\n"
                     
                     prompt = f"""
                     You are an expert WHO data classifier and pharmacological AI.
@@ -157,7 +160,6 @@ if uploaded_file is not None:
                         response = model.generate_content(prompt)
                         result = json.loads(response.text)
                         
-                        # Якщо модель сигналізує про повне нерозуміння, дописуємо мітку в колонку А
                         if result.get("needs_review") is True:
                             st.session_state.df.at[index, col_generic] = f"{generic_name} [Needs Review]"
                             
