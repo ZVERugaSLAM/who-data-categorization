@@ -8,10 +8,9 @@ import difflib
 from dotenv import load_dotenv
 import google.generativeai as genai
 
-# Завантаження змінних середовища (для локальної роботи)
+# Завантаження змінних середовища
 load_dotenv()
 
-# Налаштування сторінки
 st.set_page_config(page_title="WHO Data Categorization", page_icon="🌍", layout="wide")
 
 st.title("🌍 WHO Project: Автоматична каталогізація даних")
@@ -36,7 +35,6 @@ uploaded_file = st.file_uploader("Завантажте файл Book3_classified
 if uploaded_file is not None:
     try:
         if 'df' not in st.session_state:
-            # Автоматичний пошук правильного рядка із заголовками
             df_head = pd.read_excel(uploaded_file, sheet_name=0, header=None, nrows=10)
             header_row = 0
             for idx, row in df_head.iterrows():
@@ -61,7 +59,6 @@ if uploaded_file is not None:
         avail_cat = st.session_state.avail_cat
         avail_subcat = st.session_state.avail_subcat
         
-        # Динамічний пошук назв колонок
         col_names = df.columns.tolist()
         col_generic = next((c for c in col_names if 'generic name' in str(c).lower()), col_names[1])
         col_standard = next((c for c in col_names if 'standard naming' in str(c).lower()), col_names[2])
@@ -129,27 +126,29 @@ if uploaded_file is not None:
                     matches = difflib.get_close_matches(generic_name, kb_names, n=3, cutoff=0.3)
                     context_str = ""
                     if matches:
-                        context_str = "HISTORICAL CONTEXT (Follow this precedent for similar items):\n"
+                        context_str = "HISTORICAL RAG CONTEXT:\n"
                         for m in matches:
                             matched_row = df_kb[df_kb[col_generic] == m].iloc[0]
-                            context_str += f"- Item: '{m}' -> Category: '{matched_row[col_category]}', Subcategory: '{matched_row[col_subcategory]}', Cold chain: '{matched_row[col_cold_chain]}', Standard Name: '{matched_row[col_standard]}'\n"
+                            context_str += f"- '{m}' -> Category: '{matched_row[col_category]}', Subcat: '{matched_row[col_subcategory]}', Std Name: '{matched_row[col_standard]}'\n"
                     
                     prompt = f"""
-                    You are a medical/pharmaceutical data classification expert for a WHO project.
-                    Analyze the following original product description: "{generic_name}"
+                    You are an expert WHO data classifier and pharmacological AI.
+                    Analyze the original product description: "{generic_name}"
                     
                     {context_str}
                     
                     Provide a JSON response with exactly these keys in this STRICT order:
-                    1. "analysis": Analyze the input. If it is a medicine, identify the active ingredients (INN) behind the trade name. Determine if elements like dosages or packaging should be removed.
-                    2. "category": Select the most appropriate category from this list: {avail_cat}. STRICTLY match historical context if similar. If the description clearly indicates a medicine (e.g., tablets, injection, infusion, syrup) but you do not know the INN, MUST still classify as 'Medicines'.
-                    3. "subcategory": Select the most appropriate subcategory from this list: {avail_subcat}. STRICTLY match historical context if similar.
-                    4. "standard_naming": 
-                       - IF "category" is 'Medicines': Provide ONLY the International Nonproprietary Name (INN). For 1 ingredient, return INN. For 2 ingredients, use " + ". For >2 ingredients, use "[Primary INN] combinations". 
-                       - FALLBACK FOR MEDICINES: If you absolutely cannot determine the INN for a local brand, output the cleaned original brand name and append " [Needs Review]" (e.g., "Polifleks [Needs Review]").
-                       - IF "category" is NOT 'Medicines': Provide a clean, standardized generic product name. Remove brand names and excessive specs.
-                       - ALWAYS ensure consistency with the provided historical context.
-                    5. "cold_chain": Select EXACTLY ONE of these options: ["2° to 8°C", "Ambient", "Freezer", "-20°C", "General Cargo"].
+                    1. "analysis": Step-by-step reasoning. Determine if the item is a pharmaceutical drug/medication/infusion. 
+                       - IF YES: Rely STRICTLY on your internal pharmacological database to identify the INN. IGNORE the Historical RAG Context if it contradicts medical facts.
+                       - IF NO: Analyze it as medical equipment/consumable using the Historical RAG Context as a guide.
+                    2. "is_medicine": true or false.
+                    3. "category": Select from this list: {avail_cat}. If is_medicine is true, this MUST be 'Medicines'. If false, use RAG context/logic.
+                    4. "subcategory": Select from this list: {avail_subcat}. If is_medicine is true, choose the best pharmacological fit based on your knowledge. If false, rely on RAG context.
+                    5. "standard_naming": 
+                       - If is_medicine is true: Output ONLY the pure INN. 1 ingredient = INN. 2 ingredients = "INN1 + INN2". >2 ingredients = "[Primary INN] combinations". NEVER output trade/brand names or forms (like powder, vial).
+                       - If is_medicine is false: Output a clean, standardized generic product name.
+                    6. "cold_chain": Select EXACTLY ONE of: ["2° to 8°C", "Ambient", "Freezer", "-20°C", "General Cargo"].
+                    7. "needs_review": Boolean (true or false). Set to true ONLY IF you are 100% unable to identify the product or its nature. Otherwise, set to false.
                     
                     Return ONLY valid JSON.
                     """
@@ -158,6 +157,10 @@ if uploaded_file is not None:
                         response = model.generate_content(prompt)
                         result = json.loads(response.text)
                         
+                        # Якщо модель сигналізує про повне нерозуміння, дописуємо мітку в колонку А
+                        if result.get("needs_review") is True:
+                            st.session_state.df.at[index, col_generic] = f"{generic_name} [Needs Review]"
+                            
                         st.session_state.df.at[index, col_category] = result.get("category", "")
                         st.session_state.df.at[index, col_subcategory] = result.get("subcategory", "")
                         st.session_state.df.at[index, col_standard] = result.get("standard_naming", "")
