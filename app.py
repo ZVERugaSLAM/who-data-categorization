@@ -36,7 +36,7 @@ uploaded_file = st.file_uploader("Завантажте файл Book3_classified
 if uploaded_file is not None:
     try:
         if 'df' not in st.session_state:
-            # 1. Автоматичний пошук правильного рядка із заголовками
+            # Автоматичний пошук правильного рядка із заголовками
             df_head = pd.read_excel(uploaded_file, sheet_name=0, header=None, nrows=10)
             header_row = 0
             for idx, row in df_head.iterrows():
@@ -61,7 +61,7 @@ if uploaded_file is not None:
         avail_cat = st.session_state.avail_cat
         avail_subcat = st.session_state.avail_subcat
         
-        # 2. Динамічний пошук назв колонок, щоб уникнути помилок при зміні структури
+        # Динамічний пошук назв колонок
         col_names = df.columns.tolist()
         col_generic = next((c for c in col_names if 'generic name' in str(c).lower()), col_names[1])
         col_standard = next((c for c in col_names if 'standard naming' in str(c).lower()), col_names[2])
@@ -134,16 +134,20 @@ if uploaded_file is not None:
                             matched_row = df_kb[df_kb[col_generic] == m].iloc[0]
                             context_str += f"- Item: '{m}' -> Category: '{matched_row[col_category]}', Subcategory: '{matched_row[col_subcategory]}', Cold chain: '{matched_row[col_cold_chain]}', Standard Name: '{matched_row[col_standard]}'\n"
                     
+                    # Оновлений промпт із жорсткою логікою INN та зміненим порядком ключів JSON
                     prompt = f"""
-                    You are a medical/pharmaceutical classification assistant for a WHO project.
-                    Analyze the following generic name/product: "{generic_name}"
+                    You are a medical/pharmaceutical data classification expert for a WHO project.
+                    Analyze the following original product description: "{generic_name}"
                     
                     {context_str}
                     
-                    Provide a JSON response with exactly these keys:
-                    1. "standard_naming": The scientific name (INN / Latin binomial / chemical). For multi-component combination drugs with trade names, DO NOT use the trade name. Use the format "[Primary INN] combinations" (e.g., "Paracetamol combinations") or list the INNs if only two. Ensure consistency with historical context if similar.
-                    2. "category": Select the most appropriate category from this list: {avail_cat}. STRICTLY match historical context if similar.
-                    3. "subcategory": Select the most appropriate subcategory from this list: {avail_subcat}. STRICTLY match historical context if similar.
+                    Provide a JSON response with exactly these keys in this order:
+                    1. "category": Select the most appropriate category from this list: {avail_cat}. STRICTLY match historical context if similar.
+                    2. "subcategory": Select the most appropriate subcategory from this list: {avail_subcat}. STRICTLY match historical context if similar.
+                    3. "standard_naming": 
+                       - IF "category" is 'Medicines': You MUST extract and provide ONLY the International Nonproprietary Name (INN) of the active ingredient(s). Remove all brand/trade names, dosages (e.g., 500mg), and packaging details. For 1 ingredient, return the INN (e.g., "Ibuprofen"). For 2 ingredients, use " + " (e.g., "Amoxicillin + Clavulanic acid"). For >2 ingredients or complex cold/flu remedies with trade names, use "[Primary INN] combinations" (e.g., "Paracetamol combinations").
+                       - IF "category" is NOT 'Medicines': Provide a clean, standardized generic product name. Remove brand names, random numbers, and excessive specs (e.g., change "Glove Examination (n2065-Blue S), nitrile..." to "Examination gloves, nitrile").
+                       - ALWAYS ensure consistency with the provided historical context.
                     4. "cold_chain": Select EXACTLY ONE of these options: ["2° to 8°C", "Ambient", "Freezer", "-20°C", "General Cargo"].
                     
                     Return ONLY valid JSON.
@@ -153,9 +157,9 @@ if uploaded_file is not None:
                         response = model.generate_content(prompt)
                         result = json.loads(response.text)
                         
-                        st.session_state.df.at[index, col_standard] = result.get("standard_naming", "")
                         st.session_state.df.at[index, col_category] = result.get("category", "")
                         st.session_state.df.at[index, col_subcategory] = result.get("subcategory", "")
+                        st.session_state.df.at[index, col_standard] = result.get("standard_naming", "")
                         st.session_state.df.at[index, col_cold_chain] = result.get("cold_chain", "")
                         st.session_state.df.at[index, "🔄 Оброблено ШІ"] = True
                         
