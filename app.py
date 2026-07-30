@@ -36,7 +36,16 @@ uploaded_file = st.file_uploader("Завантажте файл Book3_classified
 if uploaded_file is not None:
     try:
         if 'df' not in st.session_state:
-            st.session_state.df = pd.read_excel(uploaded_file, sheet_name=0, header=3)
+            # 1. Автоматичний пошук правильного рядка із заголовками
+            df_head = pd.read_excel(uploaded_file, sheet_name=0, header=None, nrows=10)
+            header_row = 0
+            for idx, row in df_head.iterrows():
+                if any(isinstance(val, str) and 'generic name' in val.lower() for val in row.values):
+                    header_row = idx
+                    break
+            
+            st.session_state.df = pd.read_excel(uploaded_file, sheet_name=0, header=header_row)
+            
             try:
                 st.session_state.sheet2 = pd.read_excel(uploaded_file, sheet_name=1)
                 st.session_state.avail_cat = st.session_state.sheet2['Category'].dropna().unique().tolist()
@@ -52,32 +61,33 @@ if uploaded_file is not None:
         avail_cat = st.session_state.avail_cat
         avail_subcat = st.session_state.avail_subcat
         
+        # 2. Динамічний пошук назв колонок, щоб уникнути помилок при зміні структури
         col_names = df.columns.tolist()
-        col_generic = col_names[1]
-        col_standard = col_names[2]
-        col_category = col_names[3]
-        col_subcategory = col_names[4]
-        col_cold_chain = col_names[5]
-        col_review = col_names[6]
+        col_generic = next((c for c in col_names if 'generic name' in str(c).lower()), col_names[1])
+        col_standard = next((c for c in col_names if 'standard naming' in str(c).lower()), col_names[2])
+        col_category = next((c for c in col_names if 'category' in str(c).lower() and 'sub' not in str(c).lower()), col_names[3])
+        col_subcategory = next((c for c in col_names if 'subcategory' in str(c).lower()), col_names[4])
+        col_cold_chain = next((c for c in col_names if 'cold chain' in str(c).lower()), col_names[5])
+        col_review = next((c for c in col_names if 'review' in str(c).lower()), col_names[6])
 
         st.subheader("1. Фільтрація даних для обробки")
         
         f_cols = st.columns(6)
         
         with f_cols[0]:
-            search_generic = st.text_input("A: generic name", placeholder="Пошук...")
+            search_generic = st.text_input(f"A: {col_generic}", placeholder="Пошук...")
         with f_cols[1]:
-            search_standard = st.text_input("B: Standard naming", placeholder="Пошук...")
+            search_standard = st.text_input(f"B: {col_standard}", placeholder="Пошук...")
         with f_cols[2]:
-            filter_cat = st.multiselect("C: Category", options=df[col_category].dropna().unique().tolist())
+            filter_cat = st.multiselect(f"C: {col_category}", options=df[col_category].dropna().unique().tolist())
         with f_cols[3]:
-            filter_subcat = st.multiselect("D: Subcategory", options=df[col_subcategory].dropna().unique().tolist())
+            filter_subcat = st.multiselect(f"D: {col_subcategory}", options=df[col_subcategory].dropna().unique().tolist())
         with f_cols[4]:
-            filter_cold = st.multiselect("E: Cold chain", options=df[col_cold_chain].dropna().unique().tolist())
+            filter_cold = st.multiselect(f"E: {col_cold_chain}", options=df[col_cold_chain].dropna().unique().tolist())
         with f_cols[5]:
             status_options = df[col_review].dropna().unique().tolist()
             default_status = ["REVIEW"] if "REVIEW" in status_options else []
-            filter_status = st.multiselect("F: Статус", options=status_options, default=default_status)
+            filter_status = st.multiselect(f"F: {col_review}", options=status_options, default=default_status)
 
         mask = pd.Series(True, index=df.index)
         if search_generic:
@@ -167,9 +177,9 @@ if uploaded_file is not None:
         st.info("Рядки, які були оброблені ШІ у поточній сесії, позначені чекбоксом '🔄 Оброблено ШІ'.")
         
         col_config = {
-            col_category: st.column_config.SelectboxColumn("Category", options=avail_cat, required=True),
-            col_subcategory: st.column_config.SelectboxColumn("Subcategory", options=avail_subcat, required=True),
-            col_cold_chain: st.column_config.SelectboxColumn("Cold chain", options=["2° to 8°C", "Ambient", "Freezer", "-20°C", "General Cargo"], required=False)
+            col_category: st.column_config.SelectboxColumn(col_category, options=avail_cat, required=True),
+            col_subcategory: st.column_config.SelectboxColumn(col_subcategory, options=avail_subcat, required=True),
+            col_cold_chain: st.column_config.SelectboxColumn(col_cold_chain, options=["2° to 8°C", "Ambient", "Freezer", "-20°C", "General Cargo"], required=False)
         }
         
         edited_df = st.data_editor(
