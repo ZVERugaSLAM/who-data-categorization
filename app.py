@@ -17,7 +17,7 @@ st.set_page_config(page_title="WHO Data Categorization", page_icon="🌍", layou
 st.title("🌍 WHO Project: Автоматична каталогізація даних")
 st.markdown("Завантажте файл, відфільтруйте необхідні позиції та запустіть обробку. Колонка F залишається без змін.")
 
-# Гнучка перевірка API ключа (локально .env або хмарні Secrets)
+# Гнучка перевірка API ключа
 api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
     try:
@@ -134,7 +134,6 @@ if uploaded_file is not None:
                             matched_row = df_kb[df_kb[col_generic] == m].iloc[0]
                             context_str += f"- Item: '{m}' -> Category: '{matched_row[col_category]}', Subcategory: '{matched_row[col_subcategory]}', Cold chain: '{matched_row[col_cold_chain]}', Standard Name: '{matched_row[col_standard]}'\n"
                     
-                    # Інтеграція Chain-of-Thought
                     prompt = f"""
                     You are a medical/pharmaceutical data classification expert for a WHO project.
                     Analyze the following original product description: "{generic_name}"
@@ -142,12 +141,13 @@ if uploaded_file is not None:
                     {context_str}
                     
                     Provide a JSON response with exactly these keys in this STRICT order:
-                    1. "analysis": Analyze the input step-by-step. If it is a medicine, identify the active ingredients (INN) behind the trade/brand name (e.g., "AMICITRON contains Paracetamol + Phenylephrine + Pheniramine + Ascorbic acid"; "ALBUNORM contains Human albumin"). If it's a multi-component cold/flu remedy, determine the primary active ingredient. Identify and state what elements are brand names, dosages, or packaging to be removed.
-                    2. "category": Select the most appropriate category from this list: {avail_cat}. STRICTLY match historical context if similar.
+                    1. "analysis": Analyze the input. If it is a medicine, identify the active ingredients (INN) behind the trade name. Determine if elements like dosages or packaging should be removed.
+                    2. "category": Select the most appropriate category from this list: {avail_cat}. STRICTLY match historical context if similar. If the description clearly indicates a medicine (e.g., tablets, injection, infusion, syrup) but you do not know the INN, MUST still classify as 'Medicines'.
                     3. "subcategory": Select the most appropriate subcategory from this list: {avail_subcat}. STRICTLY match historical context if similar.
                     4. "standard_naming": 
-                       - IF "category" is 'Medicines': Based on your "analysis", provide ONLY the International Nonproprietary Name (INN) of the active ingredient(s). Remove all brand/trade names, dosages (e.g., 500mg, 20%), and packaging details (e.g., vials, powder, solution). For 1 ingredient, return the INN (e.g., "Ibuprofen"). For 2 ingredients, use " + " (e.g., "Amoxicillin + Clavulanic acid"). For >2 ingredients or complex cold/flu remedies with trade names, use "[Primary INN] combinations" (e.g., "Paracetamol combinations"). NEVER output trade names (like Amicitron, Gripomed, Albunorm) for medicines.
-                       - IF "category" is NOT 'Medicines': Provide a clean, standardized generic product name. Remove brand names, random numbers, and excessive specs.
+                       - IF "category" is 'Medicines': Provide ONLY the International Nonproprietary Name (INN). For 1 ingredient, return INN. For 2 ingredients, use " + ". For >2 ingredients, use "[Primary INN] combinations". 
+                       - FALLBACK FOR MEDICINES: If you absolutely cannot determine the INN for a local brand, output the cleaned original brand name and append " [Needs Review]" (e.g., "Polifleks [Needs Review]").
+                       - IF "category" is NOT 'Medicines': Provide a clean, standardized generic product name. Remove brand names and excessive specs.
                        - ALWAYS ensure consistency with the provided historical context.
                     5. "cold_chain": Select EXACTLY ONE of these options: ["2° to 8°C", "Ambient", "Freezer", "-20°C", "General Cargo"].
                     
