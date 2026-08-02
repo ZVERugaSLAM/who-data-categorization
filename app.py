@@ -56,8 +56,6 @@ if uploaded_file is not None:
             st.session_state.df.insert(0, "🔄 Оброблено ШІ", False)
 
         df = st.session_state.df
-        avail_cat = st.session_state.avail_cat
-        avail_subcat = st.session_state.avail_subcat
         
         col_names = df.columns.tolist()
         col_generic = next((c for c in col_names if 'generic name' in str(c).lower()), col_names[1])
@@ -76,9 +74,9 @@ if uploaded_file is not None:
         with f_cols[1]:
             search_standard = st.text_input(f"B: {col_standard}", placeholder="Пошук...")
         with f_cols[2]:
-            filter_cat = st.multiselect(f"C: {col_category}", options=df[col_category].dropna().unique().tolist())
+            filter_cat = st.multiselect(f"C: {col_category}", options=st.session_state.avail_cat)
         with f_cols[3]:
-            filter_subcat = st.multiselect(f"D: {col_subcategory}", options=df[col_subcategory].dropna().unique().tolist())
+            filter_subcat = st.multiselect(f"D: {col_subcategory}", options=st.session_state.avail_subcat)
         with f_cols[4]:
             filter_cold = st.multiselect(f"E: {col_cold_chain}", options=df[col_cold_chain].dropna().unique().tolist())
         with f_cols[5]:
@@ -117,7 +115,8 @@ if uploaded_file is not None:
                 
                 total_rows = len(filtered_df)
                 
-                df_kb = df[~df.index.isin(filtered_df.index) & df[col_category].notna()].copy()
+                # RAG база: тільки рядки зі статусом REVIEW, ігноруємо HIGH та MEDIUM
+                df_kb = df[~df.index.isin(filtered_df.index) & df[col_category].notna() & (df[col_review].astype(str).str.upper().str.strip() == 'REVIEW')].copy()
                 kb_names = df_kb[col_generic].dropna().astype(str).tolist()
                 
                 for idx, (index, row) in enumerate(filtered_df.iterrows()):
@@ -126,9 +125,8 @@ if uploaded_file is not None:
                     matches = difflib.get_close_matches(generic_name, kb_names, n=3, cutoff=0.3)
                     context_str = ""
                     if matches:
-                        context_str = "HISTORICAL RAG CONTEXT:\n"
+                        context_str = "HISTORICAL RAG CONTEXT (Only verified REVIEW data):\n"
                         for m in matches:
-                            # Додано конвертацію в строку (astype(str)) та перевірку на empty для уникнення помилки indexer
                             matching_rows = df_kb[df_kb[col_generic].astype(str) == m]
                             if not matching_rows.empty:
                                 matched_row = matching_rows.iloc[0]
@@ -141,17 +139,17 @@ if uploaded_file is not None:
                     {context_str}
                     
                     Provide a JSON response with exactly these keys in this STRICT order:
-                    1. "analysis": Step-by-step reasoning. Determine if the item is a pharmaceutical drug/medication/infusion. 
-                       - IF YES: Rely STRICTLY on your internal pharmacological database to identify the INN. IGNORE the Historical RAG Context if it contradicts medical facts.
-                       - IF NO: Analyze it as medical equipment/consumable using the Historical RAG Context as a guide.
+                    1. "analysis": Step-by-step reasoning.
+                       - IF it's a Medicine: Query your pharmacological database. Identify the primary INN. If it's a complex cold remedy (e.g., AMICITRON, GRIPOMED), extract the MAIN active ingredient (e.g., Paracetamol) and determine its standard dosage.
+                       - IF it's a Non-Medicine: Analyze how to clean the name (remove SKU/numbers at the start, remove quotes, move volume/dimensions to the end).
                     2. "is_medicine": true or false.
-                    3. "category": Select from this list: {avail_cat}. If is_medicine is true, this MUST be 'Medicines'. If false, use RAG context/logic.
-                    4. "subcategory": Select from this list: {avail_subcat}. If is_medicine is true, choose the best pharmacological fit based on your knowledge. If false, rely on RAG context.
+                    3. "category": Select from this list: {st.session_state.avail_cat}. If is_medicine is true, this MUST be 'Medicines'. If it absolutely does not fit ANY available category, create a new one and append " [new]".
+                    4. "subcategory": Select from this list: {st.session_state.avail_subcat}. If it absolutely does not fit ANY available subcategory, create a new one and append " [new]".
                     5. "standard_naming": 
-                       - If is_medicine is true: Output ONLY the pure INN. 1 ingredient = INN. 2 ingredients = "INN1 + INN2". >2 ingredients = "[Primary INN] combinations". NEVER output trade/brand names or forms (like powder, vial).
-                       - If is_medicine is false: Output a clean, standardized generic product name.
+                       - If is_medicine is true: Output Primary INN + dosage (mg, g, %, IU) + volume (ml, L). If dosage is missing in the name, pull standard dosage from your knowledge. For complex mixtures (like fat emulsions), output general name + components + volume at the end. DO NOT use ALL CAPS. Maintain proper spacing. Examples: "Paracetamol 500 mg", "Cefepime 1 g", "Sodium Chloride 0.9%, 1000 ml", "Fat emulsions 20%, 500 ml".
+                       - If is_medicine is false: Output cleaned name. Remove starting SKU/article numbers. Remove quotes. Move volume or size (e.g., 100ML, 3 mm) from the beginning to the end. Example: "Tris Hydrochloride, 1M Solution, pH 8.0, 100 ml".
                     6. "cold_chain": Select EXACTLY ONE of: ["2° to 8°C", "Ambient", "Freezer", "-20°C", "General Cargo"].
-                    7. "needs_review": Boolean (true or false). Set to true ONLY IF you are 100% unable to identify the product or its nature. Otherwise, set to false.
+                    7. "needs_review": Boolean (true or false). Set to true ONLY IF you are 100% unable to identify what the product is.
                     
                     Return ONLY valid JSON.
                     """
@@ -162,9 +160,18 @@ if uploaded_file is not None:
                         
                         if result.get("needs_review") is True:
                             st.session_state.df.at[index, col_generic] = f"{generic_name} [Needs Review]"
+                        
+                        ai_cat = result.get("category", "")
+                        ai_subcat = result.get("subcategory", "")
+                        
+                        # Динамічне додавання нових категорій для Data Editor
+                        if ai_cat and ai_cat not in st.session_state.avail_cat:
+                            st.session_state.avail_cat.append(ai_cat)
+                        if ai_subcat and ai_subcat not in st.session_state.avail_subcat:
+                            st.session_state.avail_subcat.append(ai_subcat)
                             
-                        st.session_state.df.at[index, col_category] = result.get("category", "")
-                        st.session_state.df.at[index, col_subcategory] = result.get("subcategory", "")
+                        st.session_state.df.at[index, col_category] = ai_cat
+                        st.session_state.df.at[index, col_subcategory] = ai_subcat
                         st.session_state.df.at[index, col_standard] = result.get("standard_naming", "")
                         st.session_state.df.at[index, col_cold_chain] = result.get("cold_chain", "")
                         st.session_state.df.at[index, "🔄 Оброблено ШІ"] = True
@@ -187,8 +194,8 @@ if uploaded_file is not None:
         st.info("Рядки, які були оброблені ШІ у поточній сесії, позначені чекбоксом '🔄 Оброблено ШІ'.")
         
         col_config = {
-            col_category: st.column_config.SelectboxColumn(col_category, options=avail_cat, required=True),
-            col_subcategory: st.column_config.SelectboxColumn(col_subcategory, options=avail_subcat, required=True),
+            col_category: st.column_config.SelectboxColumn(col_category, options=st.session_state.avail_cat, required=True),
+            col_subcategory: st.column_config.SelectboxColumn(col_subcategory, options=st.session_state.avail_subcat, required=True),
             col_cold_chain: st.column_config.SelectboxColumn(col_cold_chain, options=["2° to 8°C", "Ambient", "Freezer", "-20°C", "General Cargo"], required=False)
         }
         
