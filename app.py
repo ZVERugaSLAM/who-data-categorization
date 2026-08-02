@@ -6,7 +6,8 @@ import os
 import time
 import difflib
 from dotenv import load_dotenv
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 # Завантаження змінних середовища
 load_dotenv()
@@ -25,7 +26,7 @@ if not api_key:
         api_key = None
 
 if api_key:
-    genai.configure(api_key=api_key)
+    client = genai.Client(api_key=api_key)
 else:
     st.error("API ключ не знайдено. Перевірте файл .env локально або налаштування Secrets на Streamlit Cloud.")
     st.stop()
@@ -101,21 +102,15 @@ if uploaded_file is not None:
         filtered_df = df[mask]
         
         st.write(f"📊 Обрано рядків для обробки: **{len(filtered_df)}** (із загальних {len(df)})")
-        st.dataframe(filtered_df.head(5), use_container_width=True)
+        st.dataframe(filtered_df.head(5), width="stretch")
         
         if len(filtered_df) > 0:
             if st.button(f"🚀 Обробити відфільтровані рядки ({len(filtered_df)})", type="primary"):
-                model = genai.GenerativeModel(
-                    "gemini-2.5-flash",
-                    generation_config={"response_mime_type": "application/json"}
-                )
-                
                 progress_text = "Обробка даних ШІ..."
                 my_bar = st.progress(0, text=progress_text)
                 
                 total_rows = len(filtered_df)
                 
-                # RAG база: тільки рядки зі статусом REVIEW, ігноруємо HIGH та MEDIUM
                 df_kb = df[~df.index.isin(filtered_df.index) & df[col_category].notna() & (df[col_review].astype(str).str.upper().str.strip() == 'REVIEW')].copy()
                 kb_names = df_kb[col_generic].dropna().astype(str).tolist()
                 
@@ -155,7 +150,13 @@ if uploaded_file is not None:
                     """
                     
                     try:
-                        response = model.generate_content(prompt)
+                        response = client.models.generate_content(
+                            model='gemini-2.5-flash',
+                            contents=prompt,
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                            )
+                        )
                         result = json.loads(response.text)
                         
                         if result.get("needs_review") is True:
@@ -164,7 +165,6 @@ if uploaded_file is not None:
                         ai_cat = result.get("category", "")
                         ai_subcat = result.get("subcategory", "")
                         
-                        # Динамічне додавання нових категорій для Data Editor
                         if ai_cat and ai_cat not in st.session_state.avail_cat:
                             st.session_state.avail_cat.append(ai_cat)
                         if ai_subcat and ai_subcat not in st.session_state.avail_subcat:
@@ -202,7 +202,7 @@ if uploaded_file is not None:
         edited_df = st.data_editor(
             st.session_state.df, 
             column_config=col_config,
-            use_container_width=True,
+            width="stretch",
             height=600,
             key="main_editor"
         )
