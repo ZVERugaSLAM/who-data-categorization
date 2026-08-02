@@ -58,13 +58,14 @@ if uploaded_file is not None:
 
         df = st.session_state.df
         
+        # ВИПРАВЛЕНО: Безпечне призначення колонок із запобіганням list index out of range
         col_names = df.columns.tolist()
-        col_generic = next((c for c in col_names if 'generic name' in str(c).lower()), col_names[1])
-        col_standard = next((c for c in col_names if 'standard naming' in str(c).lower()), col_names[2])
-        col_category = next((c for c in col_names if 'category' in str(c).lower() and 'sub' not in str(c).lower()), col_names[3])
-        col_subcategory = next((c for c in col_names if 'subcategory' in str(c).lower()), col_names[4])
-        col_cold_chain = next((c for c in col_names if 'cold chain' in str(c).lower()), col_names[5])
-        col_review = next((c for c in col_names if 'review' in str(c).lower()), col_names[6])
+        col_generic = next((c for c in col_names if 'generic name' in str(c).lower()), col_names[1] if len(col_names) > 1 else col_names[-1])
+        col_standard = next((c for c in col_names if 'standard naming' in str(c).lower()), col_names[2] if len(col_names) > 2 else col_names[-1])
+        col_category = next((c for c in col_names if 'category' in str(c).lower() and 'sub' not in str(c).lower()), col_names[3] if len(col_names) > 3 else col_names[-1])
+        col_subcategory = next((c for c in col_names if 'subcategory' in str(c).lower()), col_names[4] if len(col_names) > 4 else col_names[-1])
+        col_cold_chain = next((c for c in col_names if 'cold chain' in str(c).lower()), col_names[5] if len(col_names) > 5 else col_names[-1])
+        col_review = next((c for c in col_names if 'review' in str(c).lower()), col_names[6] if len(col_names) > 6 else col_names[-1])
 
         st.subheader("1. Фільтрація даних для обробки")
         
