@@ -26,10 +26,8 @@ if not api_key:
         api_key = None
 
 if api_key:
-    client = genai.Client(
-        api_key=api_key,
-        http_options={'timeout': 60.0}  # Збільшено до 60 секунд для складних запитів
-    )
+    # Прибрано конфліктний параметр http_options
+    client = genai.Client(api_key=api_key)
 else:
     st.error("API ключ не знайдено. Перевірте файл .env локально або налаштування Secrets на Streamlit Cloud.")
     st.stop()
