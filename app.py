@@ -27,9 +27,10 @@ if not api_key:
         api_key = None
 
 if api_key:
+    # Встановлюємо збільшений таймаут, щоб API встигав обробляти складні RAG-запити
     client = genai.Client(
         api_key=api_key,
-        http_options={'timeout': 60.0}
+        http_options={'timeout': 120.0}
     )
 else:
     st.error("API ключ не знайдено. Перевірте файл .env локально або налаштування Secrets на Streamlit Cloud.")
@@ -115,6 +116,7 @@ if uploaded_file is not None:
                 
                 total_rows = len(filtered_df)
                 
+                # RAG База знань: ТІЛЬКИ рядки зі статусом REVIEW
                 df_kb = df[~df.index.isin(filtered_df.index) & df[col_category].notna() & (df[col_review].astype(str).str.upper().str.strip() == 'REVIEW')].copy()
                 
                 stop_processing = False
@@ -125,7 +127,7 @@ if uploaded_file is not None:
                         
                     generic_name = str(row[col_generic])
                     
-                    # --- ОПТИМІЗОВАНИЙ БЛОК RAG (Усуває зависання WebSocket) ---
+                    # Оптимізований пошук RAG (щоб не вішати процесор)
                     words = set(re.findall(r'\b[a-zA-Z0-9]{4,}\b', generic_name.lower()))
                     kb_series = df_kb[col_generic].dropna().astype(str)
                     
@@ -133,7 +135,7 @@ if uploaded_file is not None:
                         mask_kb = kb_series.str.lower().apply(lambda x: any(w in x for w in words))
                         subset = kb_series[mask_kb].tolist()
                     else:
-                        subset = kb_series.head(1000).tolist()
+                        subset = kb_series.head(500).tolist()
                         
                     matches = difflib.get_close_matches(generic_name, subset, n=3, cutoff=0.3)
                     
@@ -145,7 +147,6 @@ if uploaded_file is not None:
                             if not matching_rows.empty:
                                 matched_row = matching_rows.iloc[0]
                                 context_str += f"- '{m}' -> Category: '{matched_row[col_category]}', Subcat: '{matched_row[col_subcategory]}', Std Name: '{matched_row[col_standard]}'\n"
-                    # ------------------------------------------------------------
                     
                     prompt = f"""
                     You are an expert WHO data classifier and pharmacological AI.
@@ -153,18 +154,28 @@ if uploaded_file is not None:
                     
                     {context_str}
                     
+                    STRICT RULES:
+                    1. Base Categories and Subcategories must ONLY come from the provided lists. If and ONLY if you are 100% sure the item does not fit ANY available option, you may invent a new one, but you MUST append " [new]" to the end of its name.
+                    2. IF MEDICINE:
+                       - Extract the primary INN (International Nonproprietary Name) and dosage (mg, g, %, IU, etc.) + volume (ml, L).
+                       - For complex combinations/brands (e.g. AMICITRON, GRIPOMED), extract the main active ingredient (e.g. Paracetamol) and its dose. If dose is missing, pull the standard medical dose.
+                       - For complex mixtures like fat emulsions, keep the compound name but format properly with volume at the end.
+                       - Maintain proper spacing, NO ALL CAPS. 
+                       - Examples output format: "Paracetamol 500 mg", "Cefepime 1 g", "Sodium Chloride 0.9%, 1000 ml", "Fat emulsions 20%, 500 ml".
+                    3. IF NON-MEDICINE (Equipment, Supplies, etc.):
+                       - Clean the name. Remove starting SKU/article numbers (e.g., "091166024 Item" -> "Item").
+                       - Remove quotes (e.g., '"Medical card"' -> 'Medical card').
+                       - Move volume or size from the beginning to the end (e.g., "100ML Solution" -> "Solution, 100ML").
+                       - Leave the rest of the valid description intact.
+                       
                     Provide a JSON response with exactly these keys in this STRICT order:
                     1. "analysis": Step-by-step reasoning.
-                       - IF it's a Medicine: Query your pharmacological database. Identify the primary INN. If it's a complex cold remedy (e.g., AMICITRON, GRIPOMED), extract the MAIN active ingredient (e.g., Paracetamol) and determine its standard dosage.
-                       - IF it's a Non-Medicine: Analyze how to clean the name (remove SKU/numbers at the start, remove quotes, move volume/dimensions to the end).
                     2. "is_medicine": true or false.
-                    3. "category": Select from this list: {st.session_state.avail_cat}. If is_medicine is true, this MUST be 'Medicines'. If it absolutely does not fit ANY available category, create a new one and append " [new]".
-                    4. "subcategory": Select from this list: {st.session_state.avail_subcat}. If it absolutely does not fit ANY available subcategory, create a new one and append " [new]".
-                    5. "standard_naming": 
-                       - If is_medicine is true: Output Primary INN + dosage (mg, g, %, IU) + volume (ml, L). If dosage is missing in the name, pull standard dosage from your knowledge. For complex mixtures (like fat emulsions), output general name + components + volume at the end. DO NOT use ALL CAPS. Maintain proper spacing. Examples: "Paracetamol 500 mg", "Cefepime 1 g", "Sodium Chloride 0.9%, 1000 ml", "Fat emulsions 20%, 500 ml".
-                       - If is_medicine is false: Output cleaned name. Remove starting SKU/article numbers. Remove quotes. Move volume or size (e.g., 100ML, 3 mm) from the beginning to the end. Example: "Tris Hydrochloride, 1M Solution, pH 8.0, 100 ml".
-                    6. "cold_chain": Select EXACTLY ONE of: ["2° to 8°C", "Ambient", "Freezer", "-20°C", "General Cargo"].
-                    7. "needs_review": Boolean (true or false). Set to true ONLY IF you are 100% unable to identify what the product is.
+                    3. "category": Use the list: {st.session_state.avail_cat} or add " [new]".
+                    4. "subcategory": Use the list: {st.session_state.avail_subcat} or add " [new]".
+                    5. "standard_naming": The cleaned and formatted name based on the rules above.
+                    6. "cold_chain": Select EXACTLY ONE: ["2° to 8°C", "Ambient", "Freezer", "-20°C", "General Cargo"].
+                    7. "needs_review": true ONLY IF you are 100% unable to identify the product.
                     
                     Return ONLY valid JSON.
                     """
@@ -201,6 +212,7 @@ if uploaded_file is not None:
                                 st.session_state.df.at[index, col_cold_chain] = result.get("cold_chain", "")
                                 st.session_state.df.at[index, "🔄 Оброблено ШІ"] = True
                                 
+                                # Додаємо щойно оброблений рядок до бази знань, щоб модель "вчилася" в процесі
                                 new_row = st.session_state.df.loc[[index]]
                                 df_kb = pd.concat([df_kb, new_row])
                                 break 
