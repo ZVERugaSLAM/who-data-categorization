@@ -6,19 +6,17 @@ import os
 import time
 import difflib
 import re
+import concurrent.futures
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-# Завантаження змінних середовища
 load_dotenv()
 
 st.set_page_config(page_title="WHO Data Categorization", page_icon="🌍", layout="wide")
-
 st.title("🌍 WHO Project: Автоматична каталогізація даних")
 st.markdown("Завантажте файл, відфільтруйте необхідні позиції та запустіть обробку. Колонка F залишається без змін.")
 
-# Гнучка перевірка API ключа
 api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
     try:
@@ -27,7 +25,6 @@ if not api_key:
         api_key = None
 
 if api_key:
-    # Офіційний таймаут 25 секунд.
     client = genai.Client(
         api_key=api_key,
         http_options=types.HttpOptions(timeout=25000)
@@ -36,7 +33,7 @@ else:
     st.error("API ключ не знайдено. Перевірте файл .env локально або налаштування Secrets на Streamlit Cloud.")
     st.stop()
 
-uploaded_file = st.file_uploader("Завантажте файл Book3_classified.xlsx", type=["xlsx"])
+uploaded_file = st.file_uploader("Завантажте файл Book3_classified3.xlsx", type=["xlsx"])
 
 if uploaded_file is not None:
     try:
@@ -50,7 +47,6 @@ if uploaded_file is not None:
             
             st.session_state.df = pd.read_excel(uploaded_file, sheet_name=0, header=header_row)
             
-            # Примусово переводимо всі колонки в формат object, щоб уникнути помилок float64
             for col in st.session_state.df.columns:
                 st.session_state.df[col] = st.session_state.df[col].astype(object)
             
@@ -120,10 +116,9 @@ if uploaded_file is not None:
                 status_placeholder = st.empty()
                 
                 total_rows = len(filtered_df)
-                
                 df_kb = df[~df.index.isin(filtered_df.index) & df[col_category].notna() & (df[col_review].astype(str).str.upper().str.strip() == 'REVIEW')].copy()
+                stop_processing = False
                 
-                # Відключаємо фільтри безпеки для медичних термінів
                 gen_config = types.GenerateContentConfig(
                     response_mime_type="application/json",
                     temperature=0.1,
@@ -135,21 +130,24 @@ if uploaded_file is not None:
                     ]
                 )
                 
+                # Пул потоків з великим лімітом воркерів для запобігання дедлокам
+                executor = concurrent.futures.ThreadPoolExecutor(max_workers=2000)
+                
                 for idx, (index, row) in enumerate(filtered_df.iterrows()):
+                    if stop_processing:
+                        break
+                        
                     generic_name = str(row[col_generic])
                     status_placeholder.info(f"🔄 Аналіз: {generic_name[:50]}...")
                     
-                    # RAG пошук
                     words = set(re.findall(r'\b[a-zA-Z]{5,}\b', generic_name.lower()))
                     kb_series = df_kb[col_generic].dropna().astype(str)
                     
                     if words:
                         mask_kb = kb_series.str.lower().apply(lambda x: any(w in x for w in words))
                         subset = kb_series[mask_kb].tolist()
-                        if len(subset) > 500:
-                            subset = subset[:500] 
                     else:
-                        subset = kb_series.head(500).tolist()
+                        subset = kb_series.tolist()
                         
                     matches = difflib.get_close_matches(generic_name, subset, n=3, cutoff=0.3)
                     
@@ -194,65 +192,68 @@ if uploaded_file is not None:
                     Return ONLY valid JSON.
                     """
                     
-                    max_retries = 4
-                    for attempt in range(max_retries):
-                        try:
-                            response = client.models.generate_content(
-                                model='gemini-2.5-flash',
-                                contents=prompt,
-                                config=gen_config
-                            )
+                    try:
+                        future = executor.submit(
+                            client.models.generate_content,
+                            model='gemini-2.5-flash',
+                            contents=prompt,
+                            config=gen_config
+                        )
+                        response = future.result(timeout=20.0)
+                        
+                        if response and response.text:
+                            text = response.text.strip()
+                            if text.startswith("```"):
+                                text = re.sub(r'^```(?:json)?\n', '', text)
+                                text = re.sub(r'\n```$', '', text)
+                                
+                            result = json.loads(text)
                             
-                            if response and response.text:
-                                text = response.text.strip()
-                                if text.startswith("```"):
-                                    text = re.sub(r'^```(?:json)?\n', '', text)
-                                    text = re.sub(r'\n```$', '', text)
-                                    
-                                result = json.loads(text)
+                            if result.get("needs_review") is True:
+                                st.session_state.df.at[index, col_generic] = f"{generic_name} [Needs Review]"
+                            
+                            ai_cat = result.get("category", "")
+                            ai_subcat = result.get("subcategory", "")
+                            
+                            if ai_cat and ai_cat not in st.session_state.avail_cat:
+                                st.session_state.avail_cat.append(ai_cat)
+                            if ai_subcat and ai_subcat not in st.session_state.avail_subcat:
+                                st.session_state.avail_subcat.append(ai_subcat)
                                 
-                                if result.get("needs_review") is True:
-                                    st.session_state.df.at[index, col_generic] = f"{generic_name} [Needs Review]"
-                                
-                                ai_cat = result.get("category", "")
-                                ai_subcat = result.get("subcategory", "")
-                                
-                                if ai_cat and ai_cat not in st.session_state.avail_cat:
-                                    st.session_state.avail_cat.append(ai_cat)
-                                if ai_subcat and ai_subcat not in st.session_state.avail_subcat:
-                                    st.session_state.avail_subcat.append(ai_subcat)
-                                    
-                                st.session_state.df.at[index, col_category] = ai_cat
-                                st.session_state.df.at[index, col_subcategory] = ai_subcat
-                                st.session_state.df.at[index, col_standard] = result.get("standard_naming", "")
-                                st.session_state.df.at[index, col_cold_chain] = result.get("cold_chain", "")
-                                st.session_state.df.at[index, "🔄 Оброблено ШІ"] = True
-                                
-                                new_row = st.session_state.df.loc[[index]]
-                                df_kb = pd.concat([df_kb, new_row])
-                                break 
-                            else:
-                                if attempt == max_retries - 1:
-                                    st.warning(f"⚠️ Порожня відповідь API для рядка {index}: {generic_name}")
-                                
-                        except Exception as e:
-                            error_msg = str(e).lower()
-                            # Розумне очікування замість примусового "Kill Switch"
-                            if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg or "too many" in error_msg:
-                                status_placeholder.warning(f"⏳ Перевантаження API Google (Ліміт). Очікуємо 60 секунд... (Спроба {attempt+1}/{max_retries})")
-                                time.sleep(60)
-                            else:
-                                if attempt < max_retries - 1:
-                                    status_placeholder.warning(f"⚠️ Помилка: {e}. Повторна спроба через 5 сек...")
-                                    time.sleep(5) 
-                                else:
-                                    st.warning(f"⚠️ Пропущено рядок {index} після {max_retries} спроб. Деталі: {e}")
+                            st.session_state.df.at[index, col_category] = ai_cat
+                            st.session_state.df.at[index, col_subcategory] = ai_subcat
+                            st.session_state.df.at[index, col_standard] = result.get("standard_naming", "")
+                            st.session_state.df.at[index, col_cold_chain] = result.get("cold_chain", "")
+                            st.session_state.df.at[index, "🔄 Оброблено ШІ"] = True
+                            
+                            new_row = st.session_state.df.loc[[index]]
+                            df_kb = pd.concat([df_kb, new_row])
+                        else:
+                            status_placeholder.warning(f"⚠️ Порожня відповідь (безпека). Пропущено рядок {index}.")
+                            
+                    except concurrent.futures.TimeoutError:
+                        status_placeholder.warning(f"⏳ Таймаут 20с. Пропущено рядок {index}.")
+                    except Exception as e:
+                        error_msg = str(e).lower()
+                        if "billing" in error_msg or "per day" in error_msg:
+                            st.error(f"🛑 Критична помилка фінансування. Процес зупинено. Деталі: {e}")
+                            stop_processing = True
+                            break
+                        elif "429" in error_msg or "quota" in error_msg:
+                            status_placeholder.warning(f"⏳ Ліміт запитів API (429). Очікуємо 60 сек...")
+                            time.sleep(60)
+                        else:
+                            status_placeholder.warning(f"⚠️ Помилка: {e}. Пропущено рядок {index}.")
                     
-                    time.sleep(1) # Базова пауза для згладжування навантаження
-                    my_bar.progress((idx + 1) / total_rows, text=f"Обробка: {idx + 1}/{total_rows}")
+                    time.sleep(1) 
+                    if not stop_processing:
+                        my_bar.progress((idx + 1) / total_rows, text=f"Обробка: {idx + 1}/{total_rows}")
                 
                 status_placeholder.empty() 
-                st.success("✅ AI-обробка завершена!")
+                if stop_processing:
+                    st.warning("⚠️ Обробка перервана. Усі успішно класифіковані до цього моменту рядки збережено. Завантажте файл.")
+                else:
+                    st.success("✅ AI-обробка завершена!")
                 st.rerun()
 
         st.divider()
