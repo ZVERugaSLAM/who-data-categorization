@@ -28,7 +28,7 @@ if not api_key:
 if api_key:
     client = genai.Client(
         api_key=api_key,
-        http_options={'timeout': 15.0}
+        http_options={'timeout': 60.0}  # Збільшено до 60 секунд для складних запитів
     )
 else:
     st.error("API ключ не знайдено. Перевірте файл .env локально або налаштування Secrets на Streamlit Cloud.")
@@ -117,7 +117,12 @@ if uploaded_file is not None:
                 df_kb = df[~df.index.isin(filtered_df.index) & df[col_category].notna() & (df[col_review].astype(str).str.upper().str.strip() == 'REVIEW')].copy()
                 kb_names = df_kb[col_generic].dropna().astype(str).tolist()
                 
+                stop_processing = False
+                
                 for idx, (index, row) in enumerate(filtered_df.iterrows()):
+                    if stop_processing:
+                        break
+                        
                     generic_name = str(row[col_generic])
                     
                     matches = difflib.get_close_matches(generic_name, kb_names, n=3, cutoff=0.3)
@@ -193,15 +198,25 @@ if uploaded_file is not None:
                                     st.warning(f"⚠️ Порожня відповідь API для рядка {index}: {generic_name}")
                                 
                         except Exception as e:
+                            error_msg = str(e).lower()
+                            if "quota" in error_msg or "billing" in error_msg or "429" in error_msg:
+                                st.error(f"🛑 Критична помилка фінансування (квота/білінг). Процес примусово зупинено для збереження прогресу. Деталі: {e}")
+                                stop_processing = True
+                                break
+                            
                             if attempt < max_retries - 1:
                                 time.sleep(2 ** attempt) 
                             else:
                                 st.warning(f"⚠️ Пропущено рядок {index} після {max_retries} спроб. Деталі: {e}")
                     
-                    time.sleep(0.1)
-                    my_bar.progress((idx + 1) / total_rows, text=f"Обробка: {idx + 1}/{total_rows}")
+                    if not stop_processing:
+                        time.sleep(0.1)
+                        my_bar.progress((idx + 1) / total_rows, text=f"Обробка: {idx + 1}/{total_rows}")
                 
-                st.success("✅ AI-обробка завершена!")
+                if stop_processing:
+                    st.warning("⚠️ Обробка перервана. Усі успішно класифіковані до цього моменту рядки збережено. Завантажте файл.")
+                else:
+                    st.success("✅ AI-обробка завершена!")
                 st.rerun()
 
         st.divider()
