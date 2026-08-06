@@ -50,6 +50,11 @@ if uploaded_file is not None:
             
             st.session_state.df = pd.read_excel(uploaded_file, sheet_name=0, header=header_row)
             
+            # ЗАПОБІЖНИК: Примусово переводимо всі колонки в формат object
+            # Це усуває помилку 'float64' при записі тексту в абсолютно порожні колонки
+            for col in st.session_state.df.columns:
+                st.session_state.df[col] = st.session_state.df[col].astype(object)
+            
             try:
                 st.session_state.sheet2 = pd.read_excel(uploaded_file, sheet_name=1)
                 st.session_state.avail_cat = st.session_state.sheet2['Category'].dropna().unique().tolist()
@@ -198,7 +203,7 @@ if uploaded_file is not None:
                     max_retries = 3
                     for attempt in range(max_retries):
                         try:
-                            # Прямий синхронний виклик без пулів потоків
+                            # Прямий синхронний виклик
                             response = client.models.generate_content(
                                 model='gemini-2.5-flash',
                                 contents=prompt,
