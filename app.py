@@ -26,7 +26,10 @@ if not api_key:
         api_key = None
 
 if api_key:
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(
+        api_key=api_key,
+        http_options={'timeout': 15.0}
+    )
 else:
     st.error("API ключ не знайдено. Перевірте файл .env локально або налаштування Secrets на Streamlit Cloud.")
     st.stop()
@@ -58,7 +61,6 @@ if uploaded_file is not None:
 
         df = st.session_state.df
         
-        # ВИПРАВЛЕНО: Безпечне призначення колонок із запобіганням list index out of range
         col_names = df.columns.tolist()
         col_generic = next((c for c in col_names if 'generic name' in str(c).lower()), col_names[1] if len(col_names) > 1 else col_names[-1])
         col_standard = next((c for c in col_names if 'standard naming' in str(c).lower()), col_names[2] if len(col_names) > 2 else col_names[-1])
@@ -150,41 +152,53 @@ if uploaded_file is not None:
                     Return ONLY valid JSON.
                     """
                     
-                    try:
-                        response = client.models.generate_content(
-                            model='gemini-2.5-flash',
-                            contents=prompt,
-                            config=types.GenerateContentConfig(
-                                response_mime_type="application/json",
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        try:
+                            response = client.models.generate_content(
+                                model='gemini-2.5-flash',
+                                contents=prompt,
+                                config=types.GenerateContentConfig(
+                                    response_mime_type="application/json",
+                                    temperature=0.1
+                                )
                             )
-                        )
-                        result = json.loads(response.text)
-                        
-                        if result.get("needs_review") is True:
-                            st.session_state.df.at[index, col_generic] = f"{generic_name} [Needs Review]"
-                        
-                        ai_cat = result.get("category", "")
-                        ai_subcat = result.get("subcategory", "")
-                        
-                        if ai_cat and ai_cat not in st.session_state.avail_cat:
-                            st.session_state.avail_cat.append(ai_cat)
-                        if ai_subcat and ai_subcat not in st.session_state.avail_subcat:
-                            st.session_state.avail_subcat.append(ai_subcat)
                             
-                        st.session_state.df.at[index, col_category] = ai_cat
-                        st.session_state.df.at[index, col_subcategory] = ai_subcat
-                        st.session_state.df.at[index, col_standard] = result.get("standard_naming", "")
-                        st.session_state.df.at[index, col_cold_chain] = result.get("cold_chain", "")
-                        st.session_state.df.at[index, "🔄 Оброблено ШІ"] = True
-                        
-                        new_row = st.session_state.df.loc[[index]]
-                        df_kb = pd.concat([df_kb, new_row])
-                        kb_names.append(generic_name)
-                        
-                    except Exception as e:
-                        st.warning(f"Помилка рядка {index}: {generic_name}. Деталі: {e}")
+                            if response and response.text:
+                                result = json.loads(response.text)
+                                
+                                if result.get("needs_review") is True:
+                                    st.session_state.df.at[index, col_generic] = f"{generic_name} [Needs Review]"
+                                
+                                ai_cat = result.get("category", "")
+                                ai_subcat = result.get("subcategory", "")
+                                
+                                if ai_cat and ai_cat not in st.session_state.avail_cat:
+                                    st.session_state.avail_cat.append(ai_cat)
+                                if ai_subcat and ai_subcat not in st.session_state.avail_subcat:
+                                    st.session_state.avail_subcat.append(ai_subcat)
+                                    
+                                st.session_state.df.at[index, col_category] = ai_cat
+                                st.session_state.df.at[index, col_subcategory] = ai_subcat
+                                st.session_state.df.at[index, col_standard] = result.get("standard_naming", "")
+                                st.session_state.df.at[index, col_cold_chain] = result.get("cold_chain", "")
+                                st.session_state.df.at[index, "🔄 Оброблено ШІ"] = True
+                                
+                                new_row = st.session_state.df.loc[[index]]
+                                df_kb = pd.concat([df_kb, new_row])
+                                kb_names.append(generic_name)
+                                break 
+                            else:
+                                if attempt == max_retries - 1:
+                                    st.warning(f"⚠️ Порожня відповідь API для рядка {index}: {generic_name}")
+                                
+                        except Exception as e:
+                            if attempt < max_retries - 1:
+                                time.sleep(2 ** attempt) 
+                            else:
+                                st.warning(f"⚠️ Пропущено рядок {index} після {max_retries} спроб. Деталі: {e}")
                     
-                    time.sleep(4)
+                    time.sleep(0.1)
                     my_bar.progress((idx + 1) / total_rows, text=f"Обробка: {idx + 1}/{total_rows}")
                 
                 st.success("✅ AI-обробка завершена!")
@@ -230,4 +244,4 @@ if uploaded_file is not None:
         )
 
     except Exception as e:
-        st.error(f"Виникла помилка. Деталі: {e}")
+        st.error(f"Виникла загальна помилка додатку. Деталі: {e}")
