@@ -27,10 +27,10 @@ if not api_key:
         api_key = None
 
 if api_key:
-    # Встановлюємо збільшений таймаут, щоб API встигав обробляти складні RAG-запити
+    # Встановлюємо збільшений таймаут (120 000 мілісекунд = 120 секунд)
     client = genai.Client(
         api_key=api_key,
-        http_options={'timeout': 120.0}
+        http_options=types.HttpOptions(timeout=120000)
     )
 else:
     st.error("API ключ не знайдено. Перевірте файл .env локально або налаштування Secrets на Streamlit Cloud.")
