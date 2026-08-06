@@ -5,6 +5,7 @@ import io
 import os
 import time
 import difflib
+import re
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -26,8 +27,10 @@ if not api_key:
         api_key = None
 
 if api_key:
-    # Прибрано конфліктний параметр http_options
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(
+        api_key=api_key,
+        http_options={'timeout': 60.0}
+    )
 else:
     st.error("API ключ не знайдено. Перевірте файл .env локально або налаштування Secrets на Streamlit Cloud.")
     st.stop()
@@ -113,7 +116,6 @@ if uploaded_file is not None:
                 total_rows = len(filtered_df)
                 
                 df_kb = df[~df.index.isin(filtered_df.index) & df[col_category].notna() & (df[col_review].astype(str).str.upper().str.strip() == 'REVIEW')].copy()
-                kb_names = df_kb[col_generic].dropna().astype(str).tolist()
                 
                 stop_processing = False
                 
@@ -123,7 +125,18 @@ if uploaded_file is not None:
                         
                     generic_name = str(row[col_generic])
                     
-                    matches = difflib.get_close_matches(generic_name, kb_names, n=3, cutoff=0.3)
+                    # --- ОПТИМІЗОВАНИЙ БЛОК RAG (Усуває зависання WebSocket) ---
+                    words = set(re.findall(r'\b[a-zA-Z0-9]{4,}\b', generic_name.lower()))
+                    kb_series = df_kb[col_generic].dropna().astype(str)
+                    
+                    if words:
+                        mask_kb = kb_series.str.lower().apply(lambda x: any(w in x for w in words))
+                        subset = kb_series[mask_kb].tolist()
+                    else:
+                        subset = kb_series.head(1000).tolist()
+                        
+                    matches = difflib.get_close_matches(generic_name, subset, n=3, cutoff=0.3)
+                    
                     context_str = ""
                     if matches:
                         context_str = "HISTORICAL RAG CONTEXT (Only verified REVIEW data):\n"
@@ -132,6 +145,7 @@ if uploaded_file is not None:
                             if not matching_rows.empty:
                                 matched_row = matching_rows.iloc[0]
                                 context_str += f"- '{m}' -> Category: '{matched_row[col_category]}', Subcat: '{matched_row[col_subcategory]}', Std Name: '{matched_row[col_standard]}'\n"
+                    # ------------------------------------------------------------
                     
                     prompt = f"""
                     You are an expert WHO data classifier and pharmacological AI.
@@ -189,7 +203,6 @@ if uploaded_file is not None:
                                 
                                 new_row = st.session_state.df.loc[[index]]
                                 df_kb = pd.concat([df_kb, new_row])
-                                kb_names.append(generic_name)
                                 break 
                             else:
                                 if attempt == max_retries - 1:
