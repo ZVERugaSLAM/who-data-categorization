@@ -6,7 +6,6 @@ import os
 import time
 import difflib
 import re
-import concurrent.futures
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -28,9 +27,10 @@ if not api_key:
         api_key = None
 
 if api_key:
+    # Офіційний таймаут 25 секунд у мілісекундах. Жодних сторонніх пулів потоків.
     client = genai.Client(
         api_key=api_key,
-        http_options=types.HttpOptions(timeout=15000)
+        http_options=types.HttpOptions(timeout=25000)
     )
 else:
     st.error("API ключ не знайдено. Перевірте файл .env локально або налаштування Secrets на Streamlit Cloud.")
@@ -113,15 +113,24 @@ if uploaded_file is not None:
             if st.button(f"🚀 Обробити відфільтровані рядки ({len(filtered_df)})", type="primary"):
                 progress_text = "Обробка даних ШІ..."
                 my_bar = st.progress(0, text=progress_text)
-                status_placeholder = st.empty() # Динамічне поле для оновлення UI і уникнення відключення Streamlit
+                status_placeholder = st.empty()
                 
                 total_rows = len(filtered_df)
                 
                 df_kb = df[~df.index.isin(filtered_df.index) & df[col_category].notna() & (df[col_review].astype(str).str.upper().str.strip() == 'REVIEW')].copy()
                 stop_processing = False
                 
-                # Пул потоків для створення жорсткого таймауту
-                executor = concurrent.futures.ThreadPoolExecutor(max_workers=20)
+                # Відключаємо фільтри безпеки для медичних термінів
+                gen_config = types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1,
+                    safety_settings=[
+                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                        types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                    ]
+                )
                 
                 for idx, (index, row) in enumerate(filtered_df.iterrows()):
                     if stop_processing:
@@ -130,12 +139,16 @@ if uploaded_file is not None:
                     generic_name = str(row[col_generic])
                     status_placeholder.info(f"🔄 Аналіз: {generic_name[:50]}...")
                     
-                    words = set(re.findall(r'\b[a-zA-Z0-9]{4,}\b', generic_name.lower()))
+                    # RAG пошук: беремо слова довжиною 5+ символів, щоб відсіяти "сміття"
+                    words = set(re.findall(r'\b[a-zA-Z]{5,}\b', generic_name.lower()))
                     kb_series = df_kb[col_generic].dropna().astype(str)
                     
                     if words:
                         mask_kb = kb_series.str.lower().apply(lambda x: any(w in x for w in words))
                         subset = kb_series[mask_kb].tolist()
+                        # ЖОРСТКИЙ ЛІМІТ: щоб уникнути блокування процесора на популярних словах
+                        if len(subset) > 500:
+                            subset = subset[:500] 
                     else:
                         subset = kb_series.head(500).tolist()
                         
@@ -185,29 +198,21 @@ if uploaded_file is not None:
                     max_retries = 3
                     for attempt in range(max_retries):
                         try:
-                            # Відключаємо фільтри безпеки для медичних термінів
-                            gen_config = types.GenerateContentConfig(
-                                response_mime_type="application/json",
-                                temperature=0.1,
-                                safety_settings=[
-                                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-                                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-                                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-                                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-                                ]
-                            )
-                            
-                            # Жорсткий таймаут: якщо Google не відповідає 20с, потік примусово обривається
-                            future = executor.submit(
-                                client.models.generate_content,
+                            # Прямий синхронний виклик без пулів потоків
+                            response = client.models.generate_content(
                                 model='gemini-2.5-flash',
                                 contents=prompt,
                                 config=gen_config
                             )
-                            response = future.result(timeout=20.0)
                             
                             if response and response.text:
-                                result = json.loads(response.text)
+                                text = response.text.strip()
+                                # Очищення від маркдауну, якщо ШІ його додав
+                                if text.startswith("```"):
+                                    text = re.sub(r'^```(?:json)?\n', '', text)
+                                    text = re.sub(r'\n```$', '', text)
+                                    
+                                result = json.loads(text)
                                 
                                 if result.get("needs_review") is True:
                                     st.session_state.df.at[index, col_generic] = f"{generic_name} [Needs Review]"
@@ -233,12 +238,6 @@ if uploaded_file is not None:
                                 if attempt == max_retries - 1:
                                     st.warning(f"⚠️ Порожня відповідь API для рядка {index}: {generic_name}")
                                 
-                        except concurrent.futures.TimeoutError:
-                            if attempt == max_retries - 1:
-                                st.warning(f"⚠️ API повністю зависло на рядку {index}: {generic_name[:30]} (Пропущено)")
-                            else:
-                                status_placeholder.warning(f"⚠️ Таймаут, повторна спроба {attempt+2}... ({generic_name[:30]})")
-                                
                         except Exception as e:
                             error_msg = str(e).lower()
                             if "quota" in error_msg or "billing" in error_msg or "429" in error_msg:
@@ -247,14 +246,15 @@ if uploaded_file is not None:
                                 break
                             
                             if attempt < max_retries - 1:
-                                time.sleep(1.5) 
+                                status_placeholder.warning(f"⚠️ Помилка мережі (спроба {attempt+1}/{max_retries}). Очікування 2 сек...")
+                                time.sleep(2) 
                             else:
                                 st.warning(f"⚠️ Пропущено рядок {index} після {max_retries} спроб. Деталі: {e}")
                     
                     if not stop_processing:
                         my_bar.progress((idx + 1) / total_rows, text=f"Обробка: {idx + 1}/{total_rows}")
                 
-                status_placeholder.empty() # Очищення динамічного тексту
+                status_placeholder.empty() 
                 if stop_processing:
                     st.warning("⚠️ Обробка перервана. Усі успішно класифіковані до цього моменту рядки збережено. Завантажте файл.")
                 else:
