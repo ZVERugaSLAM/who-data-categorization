@@ -6,6 +6,7 @@ import os
 import time
 import difflib
 import re
+import concurrent.futures
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -27,10 +28,9 @@ if not api_key:
         api_key = None
 
 if api_key:
-    # Встановлюємо безпечний таймаут 25 секунд, щоб уникнути розриву з'єднання Streamlit WebSocket
     client = genai.Client(
         api_key=api_key,
-        http_options=types.HttpOptions(timeout=25000)
+        http_options=types.HttpOptions(timeout=15000)
     )
 else:
     st.error("API ключ не знайдено. Перевірте файл .env локально або налаштування Secrets на Streamlit Cloud.")
@@ -113,21 +113,23 @@ if uploaded_file is not None:
             if st.button(f"🚀 Обробити відфільтровані рядки ({len(filtered_df)})", type="primary"):
                 progress_text = "Обробка даних ШІ..."
                 my_bar = st.progress(0, text=progress_text)
+                status_placeholder = st.empty() # Динамічне поле для оновлення UI і уникнення відключення Streamlit
                 
                 total_rows = len(filtered_df)
                 
-                # RAG База знань: ТІЛЬКИ рядки зі статусом REVIEW
                 df_kb = df[~df.index.isin(filtered_df.index) & df[col_category].notna() & (df[col_review].astype(str).str.upper().str.strip() == 'REVIEW')].copy()
-                
                 stop_processing = False
+                
+                # Пул потоків для створення жорсткого таймауту
+                executor = concurrent.futures.ThreadPoolExecutor(max_workers=20)
                 
                 for idx, (index, row) in enumerate(filtered_df.iterrows()):
                     if stop_processing:
                         break
                         
                     generic_name = str(row[col_generic])
+                    status_placeholder.info(f"🔄 Аналіз: {generic_name[:50]}...")
                     
-                    # Оптимізований пошук RAG (щоб не вішати процесор)
                     words = set(re.findall(r'\b[a-zA-Z0-9]{4,}\b', generic_name.lower()))
                     kb_series = df_kb[col_generic].dropna().astype(str)
                     
@@ -183,14 +185,26 @@ if uploaded_file is not None:
                     max_retries = 3
                     for attempt in range(max_retries):
                         try:
-                            response = client.models.generate_content(
+                            # Відключаємо фільтри безпеки для медичних термінів
+                            gen_config = types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                temperature=0.1,
+                                safety_settings=[
+                                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                                ]
+                            )
+                            
+                            # Жорсткий таймаут: якщо Google не відповідає 20с, потік примусово обривається
+                            future = executor.submit(
+                                client.models.generate_content,
                                 model='gemini-2.5-flash',
                                 contents=prompt,
-                                config=types.GenerateContentConfig(
-                                    response_mime_type="application/json",
-                                    temperature=0.1
-                                )
+                                config=gen_config
                             )
+                            response = future.result(timeout=20.0)
                             
                             if response and response.text:
                                 result = json.loads(response.text)
@@ -212,13 +226,18 @@ if uploaded_file is not None:
                                 st.session_state.df.at[index, col_cold_chain] = result.get("cold_chain", "")
                                 st.session_state.df.at[index, "🔄 Оброблено ШІ"] = True
                                 
-                                # Додаємо щойно оброблений рядок до бази знань, щоб модель "вчилася" в процесі
                                 new_row = st.session_state.df.loc[[index]]
                                 df_kb = pd.concat([df_kb, new_row])
                                 break 
                             else:
                                 if attempt == max_retries - 1:
                                     st.warning(f"⚠️ Порожня відповідь API для рядка {index}: {generic_name}")
+                                
+                        except concurrent.futures.TimeoutError:
+                            if attempt == max_retries - 1:
+                                st.warning(f"⚠️ API повністю зависло на рядку {index}: {generic_name[:30]} (Пропущено)")
+                            else:
+                                status_placeholder.warning(f"⚠️ Таймаут, повторна спроба {attempt+2}... ({generic_name[:30]})")
                                 
                         except Exception as e:
                             error_msg = str(e).lower()
@@ -228,14 +247,14 @@ if uploaded_file is not None:
                                 break
                             
                             if attempt < max_retries - 1:
-                                time.sleep(2 ** attempt) 
+                                time.sleep(1.5) 
                             else:
                                 st.warning(f"⚠️ Пропущено рядок {index} після {max_retries} спроб. Деталі: {e}")
                     
                     if not stop_processing:
-                        time.sleep(0.1)
                         my_bar.progress((idx + 1) / total_rows, text=f"Обробка: {idx + 1}/{total_rows}")
                 
+                status_placeholder.empty() # Очищення динамічного тексту
                 if stop_processing:
                     st.warning("⚠️ Обробка перервана. Усі успішно класифіковані до цього моменту рядки збережено. Завантажте файл.")
                 else:
