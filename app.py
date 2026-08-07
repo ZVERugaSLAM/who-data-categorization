@@ -7,15 +7,16 @@ import time
 import difflib
 import re
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 
+# Завантаження змінних середовища
 load_dotenv()
 
 st.set_page_config(page_title="WHO Data Categorization", page_icon="🌍", layout="wide")
 st.title("🌍 WHO Project: Автоматична каталогізація даних")
 st.markdown("Завантажте файл, відфільтруйте необхідні позиції та запустіть обробку. Колонка F залишається без змін.")
 
+# Гнучка перевірка API ключа
 api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
     try:
@@ -24,9 +25,18 @@ if not api_key:
         api_key = None
 
 if api_key:
-    client = genai.Client(
-        api_key=api_key,
-        http_options=types.HttpOptions(timeout=120000) # Повертаємо великий таймаут для довгої сесії
+    genai.configure(api_key=api_key)
+    # Відключаємо фільтри безпеки в старому синтаксисі
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
+    model = genai.GenerativeModel(
+        model_name='gemini-2.5-flash',
+        safety_settings=safety_settings,
+        generation_config={"temperature": 0.1, "response_mime_type": "application/json"}
     )
 else:
     st.error("API ключ не знайдено. Перевірте файл .env локально або налаштування Secrets на Streamlit Cloud.")
@@ -118,18 +128,6 @@ if uploaded_file is not None:
                     stop_processing = False
                     processed_count = total_to_process - len(unprocessed_df)
                     
-                    # Відключені фільтри безпеки
-                    gen_config = types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.1,
-                        safety_settings=[
-                            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-                            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-                            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-                            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-                        ]
-                    )
-                    
                     for idx, (index, row) in enumerate(unprocessed_df.iterrows()):
                         if stop_processing:
                             break
@@ -137,7 +135,6 @@ if uploaded_file is not None:
                         generic_name = str(row[col_generic])
                         status_placeholder.info(f"🔄 Аналіз: {generic_name[:50]}...")
                         
-                        # RAG пошук без ліміту 500 рядків
                         words = set(re.findall(r'\b[a-zA-Z]{5,}\b', generic_name.lower()))
                         kb_series = df_kb[col_generic].dropna().astype(str)
                         
@@ -191,15 +188,9 @@ if uploaded_file is not None:
                         """
                         
                         max_retries = 3
-                        success = False
                         for attempt in range(max_retries):
                             try:
-                                # Стандартний синхронний запит
-                                response = client.models.generate_content(
-                                    model='gemini-2.5-flash',
-                                    contents=prompt,
-                                    config=gen_config
-                                )
+                                response = model.generate_content(prompt)
                                 
                                 if response and response.text:
                                     text = response.text.strip()
@@ -228,7 +219,6 @@ if uploaded_file is not None:
                                     
                                     new_row = st.session_state.df.loc[[index]]
                                     df_kb = pd.concat([df_kb, new_row])
-                                    success = True
                                     break 
                                 else:
                                     status_placeholder.warning(f"⚠️ Порожня відповідь. Спроба {attempt+1}/{max_retries}")
@@ -236,20 +226,19 @@ if uploaded_file is not None:
                                     
                             except Exception as e:
                                 error_msg = str(e).lower()
-                                if "billing" in error_msg or "per day" in error_msg:
+                                if "429" in error_msg or "quota" in error_msg:
+                                    status_placeholder.warning(f"⏳ Ліміт запитів API. Очікуємо 60 сек... (Спроба {attempt+1}/{max_retries})")
+                                    time.sleep(60)
+                                elif "billing" in error_msg:
                                     st.error(f"🛑 Критична помилка фінансування. Деталі: {e}")
                                     stop_processing = True
                                     break
-                                elif "429" in error_msg or "quota" in error_msg:
-                                    status_placeholder.warning(f"⏳ Ліміт запитів API. Очікуємо 60 сек... (Спроба {attempt+1}/{max_retries})")
-                                    time.sleep(60)
                                 else:
-                                    status_placeholder.warning(f"⚠️ Помилка: {e}. Повторна спроба через 5 сек...")
-                                    time.sleep(5)
-                        
-                        if not success and not stop_processing:
-                            st.session_state.df.at[index, col_generic] = f"{generic_name} [Error/Skipped]"
-                            st.session_state.df.at[index, "🔄 Оброблено ШІ"] = True
+                                    if attempt < max_retries - 1:
+                                        status_placeholder.warning(f"⚠️ Помилка: {e}. Повторна спроба через 5 сек...")
+                                        time.sleep(5)
+                                    else:
+                                        status_placeholder.error(f"🛑 Пропущено рядок {index} після 3 спроб.")
                         
                         processed_count += 1
                         my_bar.progress(processed_count / total_to_process, text=f"Обробка: {processed_count}/{total_to_process}")
